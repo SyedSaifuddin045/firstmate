@@ -890,57 +890,46 @@ These dry-run paths run before token and network checks, so previewing a compose
 Polling and composing are unchanged, so the full poll -> wake -> compose -> would-post loop runs end to end without a public tweet - the mode for safe end-to-end testing.
 Inspect `state/x-outbox/` to see exactly what would have gone out.
 
-## §15. Warp Backend (IPC Direct Protocol)
+## §15. Warp Backend (tmux-inside-Warp)
 
 ### Overview
 - **Backend ID:** `warp`
-- **Bridge:** `bin/fm-warp-bridge.sh` (bash, curl+nc+jq+python3)
-- **Adapter:** `bin/backends/warp.sh` (sourced via fm-backend.sh)
-- **Mode:** IPC direct protocol over local_control (Unix socket credential broker + HTTP API)
-- **Discovery:** `~/.warp/local-control/inst_*.json` — instance records with pid, port, credential_broker socket
-- **Status:** EXPERIMENTAL (like herdr backend)
+- **Bridge:** `bin/fm-warp-bridge.sh` (detection + tmux launcher)
+- **Adapter:** `bin/backends/warp.sh` (delegates ALL ops to tmux backend)
+- **Mode:** tmux running inside Warp terminal. Warp is detected via `TERM_PROGRAM=WarpTerminal`
+- **Status:** EXPERIMENTAL (delegation-based, v2)
+
+### Design Decision
+Warp's `local_control` IPC protocol is only available on internal dogfood builds (not on Stable). macOS Accessibility keystroke API requires user-granted permission. Instead of fighting either limitation, the `warp` backend auto-detects Warp and delegates all terminal operations to the proven tmux backend running inside Warp. This gives **zero protocol gaps** — tmux provides full capture, send-key, cwd, busy state.
+
+### Detection
+- `TERM_PROGRAM=WarpTerminal` → `fm_backend_detect()` returns `warp`
+- Auto-start tmux if not already inside one (`fm-warp-bridge.sh ensure-tmux`)
+- If already in tmux within Warp, uses the existing session
 
 ### Container Shape
-- ONE Warp instance (session)
-- ONE "Firstmate" window (window.create with label)
-- ONE tab per task (labeled `fm-<id>`)
-- Target string: `<instance_id>:<tab_id>:<pane_id>`
+- Standard tmux session `firstmate` running inside Warp
+- One tmux window per task (consistent with native tmux backend)
+- Target string: `firstmate:<window_id>.<pane_id>`
+- The user sees Warp's terminal at top level, tmux managing tasks inside
 
 ### Capabilities
-| Operation | Method | Notes |
-|---|---|---|
-| Tab create | `tab.create` via bridge | Tab label = task id |
-| Tab list | `tab.list` via bridge | Filter by `fm-*` label prefix |
-| Tab close | `tab.close` via bridge | Best-effort |
-| Send text | `input.insert` via bridge | Unsubmitted |
-| Send key | osascript System Events | Only works on focused window |
-| Pane capture | osascript (window title only) | Full content requires Automation permission |
-| Busy state | Always `unknown` | No native primitive |
-| Current path | Always empty | `pane.inspect` has only creation-time cwd |
+All operations delegated to tmux backend — full feature parity:
+- Window/pane capture
+- send-key (Enter, Escape, C-c)
+- send-text-submit with typed verification
+- live cwd query via `pane_current_path`
+- busy state via pane hash + regex fallback
+- window kill, list-live, resolve-bare-selector
 
-### Protocol Gaps (vs tmux/herdr)
-1. **No pane.read/capture** — 55 ActionKind enum has no read action. AppleScript fallback returns window title only
-2. **No send-key** — `input.insert` handles text only. AppleScript for Enter/Escape/C-c
-3. **No live cwd** — `pane.inspect` returns frozen creation-time cwd, not `foreground_cwd` (herdr has this)
-4. **No busy state** — No `agent.get` equivalent (herdr has this from Warp Agent Panel)
-
-### Verification Process
-1. Enable Warp Settings → Scripting
-2. `bash bin/fm-warp-bridge.sh discover` — should return instance JSON
-3. `bash bin/fm-warp-bridge.sh app ping` — should return Warp version
-4. `bash bin/fm-warp-bridge.sh tab create --label test` — creates terminal tab
-5. `bash bin/fm-warp-bridge.sh tab list` — lists all tabs
-6. `FM_BACKEND=warp` on any firstmate command — routes through warp adapter
-
-### Constraints
-- Requires curl, nc (macOS), jq, python3 (macOS built-in)
-- osascript calls only work on FOCUSED Warp window (no background pane targeting)
-- Warp must be running AND local control enabled
-- Only tested on macOS (Warp is macOS-only)
-- No web support (Warp is a native terminal emulator)
+### Auto-detection flow
+1. firstmate runs inside Warp → `TERM_PROGRAM=WarpTerminal`
+2. `fm_backend_detect()` returns `warp`
+3. `fm_backend_source warp` sources `backends/warp.sh`
+4. `fm_backend_warp_container_ensure` ensures tmux session exists
+5. All terminal operations run through tmux (sourced from `backends/tmux.sh`)
 
 ### Files
-- `~/.warp/local-control/inst_*.json` — Warp instance discovery records (one per channel)
-- `bin/fm-warp-bridge.sh` — IPC bridge (9 commands, 293 lines)
-- `bin/backends/warp.sh` — backend adapter (~300 lines)
-- `docs/warp-backend.md` — empirical verification and protocol details
+- `bin/fm-warp-bridge.sh` — Warp detection + tmux launcher (~100 lines)
+- `bin/backends/warp.sh` — thin adapter sourcing tmux backend (~100 lines)
+- `docs/warp-backend.md` — design rationale

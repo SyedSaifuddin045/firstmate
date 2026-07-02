@@ -71,6 +71,10 @@ fm_backend_detect() {
     printf 'herdr'
     return 0
   fi
+  if [ "${TERM_PROGRAM:-}" = "WarpTerminal" ]; then
+    printf 'warp'
+    return 0
+  fi
   return 1
 }
 
